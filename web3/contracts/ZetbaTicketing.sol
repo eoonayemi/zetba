@@ -16,22 +16,99 @@ contract ZetbaTicketing is ERC721Base, Permissions, ReentrancyGuard {
 
     uint256 public totalEventCreators;
     uint256 public totalMintedTickets;
-    uint256 internal occasionIdCount;  // Global occasion counter
-    address public platformOwner; // Address that collects the platform fee
-    uint256 public platformFeePercent; // Platform fee in percentage (e.g., 2 means 2%)
+    uint256 internal occasionIdCount;
+    address public platformOwner;
+    uint256 public platformFeePercent;
     uint256 internal ticketsForSaleIdCount;
-    
 
-
-    // Event declarations
+    // Events
     event OccasionCreated(uint256 indexed _occasionId, address indexed _creator, string _ipfsHash);
     event TicketMinted(address indexed _owner, uint256 indexed _occasionId, uint256 _ticketModelId, uint256 _price);
     event CheckedIn(uint256 indexed _ticketId, uint256 _occasionId);
     event OccasionDeactivated(uint256 indexed _occasionId);
     event OccasionDeleted(uint256 indexed _occasionId);
     event TicketOfferedForSale(uint256 indexed _ticketId, address indexed _owner);
-    event TicketResold(uint256 indexed _tickedId, address indexed _seller, address indexed _newOwner);
+    event TicketResold(uint256 indexed _ticketId, address indexed _seller, address indexed _newOwner);
     event EventFundsPaidOut(address indexed _eventCreator, uint256 _amtPaidOut);
+    event TicketModelUpdated(uint256 indexed _occasionId, uint256 indexed _ticketModelId);
+    event TicketModelDeactivated(uint256 indexed _occasionId, uint256 indexed _ticketModelId);
+    event TicketModelDeleted(uint256 indexed _occasionId, uint256 indexed _ticketModelId);
+
+    // Custom Errors
+    error InvalidOccasionId(uint256 occasionId);
+    error OccasionNotActive(uint256 occasionId);
+    error CallerNotEventCreator();
+    error CallerNotTicketOwner();
+    error EventNotTransferrable();
+    error TicketAlreadyCheckedIn(uint256 ticketId);
+    error TicketNotRefundable(uint256 ticketId);
+    error InsufficientFunds();
+    error TicketModelNotActive(uint256 ticketModelId);
+
+    struct MintedTicket {
+        uint256 _id;
+        uint256 occasionId;
+        uint256 ticketModelId;
+        uint256 price;
+        uint256 platformFee;
+        address owner;
+        bool isBurnt;
+        bool isForSale;
+        bool hasCheckedIn;
+        string ticketType;
+        string ipfsHash;
+}
+
+    struct TicketModel {
+        uint256 occasionId;
+        uint256 price;
+        uint256 soldTickets;
+        uint256 totalTickets;
+        bool isTransferrable;
+        bool isResellable;
+        bool isRefundable;
+        bool isActive;
+        string ticketType;
+    }
+
+    struct Occasion {
+        uint256 _id;
+        uint256 _date;
+        uint256 totalTickets;
+        uint256 soldTickets;
+        uint256 maxTicketsPerUser;
+        address creator;
+        bool isActive;
+        bool isDeleted;
+        bool isPaidOut;
+        TicketModel[] ticketModels;
+    }
+
+    mapping(uint256 => Occasion) public occasions;
+    mapping(uint256 => MintedTicket) public mintedTickets;
+    mapping(address => uint256) public userToTickets;
+    mapping(uint256 => uint256) public fundsByEventId;
+
+    // Modifiers
+    modifier onlyActiveOccasion(uint256 _occasionId) {
+        if (!occasions[_occasionId].isActive) revert OccasionNotActive(_occasionId);
+        _;
+    }
+
+    modifier onlyEventCreator(uint256 _occasionId) {
+        if (occasions[_occasionId].creator != msg.sender) revert CallerNotEventCreator();
+        _;
+    }
+
+    modifier onlyTicketOwner(uint256 _ticketId) {
+        if (mintedTickets[_ticketId].owner != msg.sender) revert CallerNotTicketOwner();
+        _;
+    }
+
+    modifier onlyExistingTicket(uint256 _ticketId) {
+        require(_exists(_ticketId), "Ticket does not exist");
+        _;
+    }
 
     constructor()
         ERC721Base(
@@ -42,117 +119,85 @@ contract ZetbaTicketing is ERC721Base, Permissions, ReentrancyGuard {
             100               // Royalty points
         )
     {
-        _setupRole(DEFAULT_ADMIN_ROLE, msg.sender); // Grant the deployer the admin role
+        _setupRole(DEFAULT_ADMIN_ROLE, msg.sender);
         platformOwner = msg.sender;
         platformFeePercent = 2;
     }
 
-    struct MintedTicket {
-        uint256 _id;
-        address owner;
-        uint256 occasionId;
-        uint256 ticketModelId;
-        string ticketType;
-        string ipfsHash;
-        uint256 price;
-        uint256 platformFee;
-        bool isBurnt;
-        bool isForSale;
-        bool hasCheckedIn;
-    }
-
-    struct TicketModel {
-        uint256 occasionId;
-        string ticketType;
-        uint256 price;
-        bool isTransferrable;
-        bool isResellable;
-        bool isRefundable;
-        bool isActive;
-        uint256 soldTickets;
-        uint256 totalTickets;
-    }
-
-    struct Occasion {
-        uint256 _id;
-        address creator;
-        string ipfsHash;
-        uint256 _date;
-        uint256 totalTickets;
-        uint256 soldTickets;
-        bool isActive;
-        bool isDeleted;
-        bool isPaidOut;
-        uint256 maxTicketsPerUser;
-        TicketModel[] ticketModels;
-        uint256 ticketModelCount;
-    }
-
-    mapping(uint256 => Occasion) public occasions;   // Mapping for all occasions
-    mapping(uint256 => MintedTicket) public mintedTickets; // Global mapping for all minted tickets
-    mapping(address => uint256) public userToTickets;
-    mapping(occasionId => uint256) public fundsByEventId;
-
-    modifier onlyActiveOccasion(uint256 _occasionId) {
-        require(occasions[_occasionId].isActive, "Occasion is not active");
-        _;
-    }
-
-    modifier onlyEventCreator(uint256 _occasionId) {
-        require(occasions[_occasionId].creator == msg.sender, "Caller is not the event creator");
-        _;
-    }
-
-    modifier onlyTicketOwner(uint256 ticketId) {
-        require(msg.sender == mintedTickets[ticketId].owner, "Caller is not the owner of the ticket");
-        _;
-    }
 
     /**
      * @dev Create a new occasion.
-     * @param ipfsHash IPFS hash of occasion metadata.
-     * @param date date of the occasion
+     * @param _ipfsHash IPFS hash of occasion metadata.
+     * @param _date date of the occasion
+     * @param _maxTicketsPerUser maximum number of tickets that can be purchased by a user
      * @return _occasionId Newly created occasion's ID.
      */
-    function createOccasion(
-        string memory _ipfsHash,
-        uint256 _date
-    ) external returns (uint256 _occasionId) {
-        require(date > block.timestamp, "Event date should be in the future");
+    function createOccasion(string calldata _ipfsHash, uint256 _date, uint256 _maxTicketsPerUser) public returns (uint256) {
+        require(_date > block.timestamp, "Event date must be in the future");
+
         Occasion storage occasion = occasions[occasionIdCount];
 
         occasion._id = occasionIdCount;
         occasion.creator = msg.sender;
-        occasion.ipfsHash = ipfsHash;
-        occasion.date = date;
+        occasion._date = _date;
         occasion.isActive = true;
         occasion.isDeleted = false;
+        occasion.maxTicketsPerUser = _maxTicketsPerUser;
 
-        occasionIdCount++; // Increment global occasion ID counter
+        occasionIdCount++;
 
-        emit OccasionCreated(occasionIdCount, msg.sender, ipfsHash);
+        emit OccasionCreated(occasionIdCount, msg.sender, _ipfsHash);
         return occasionIdCount - 1;
+    }
+
+    /**
+     * @dev Create a new occasion.
+     * @param _ipfsHash IPFS hash of occasion metadata.
+     * @param _date date of the occasion
+     * @return _occasionId Newly created occasion's ID.
+     */
+    function createOccasion(string calldata _ipfsHash, uint256 _date) external returns (uint256) {
+        return createOccasion(_ipfsHash, _date, 1);
     }
 
     /**
      * @dev Update an existing occasion.
      * @param _occasionId ID of the occasion to update.
-     * @param ipfsHash New IPFS hash of occasion metadata.
-     * @param date New date for the occasion.
+     * @param _ipfsHash New IPFS hash of occasion metadata.
+     * @param _date New date for the occasion.
+     * @param _maxTicketsPerUser New maximum number of tickets that cab be purchased by user
      */
     function updateOccasion(
         uint256 _occasionId,
-        string memory _ipfsHash,
+        string calldata _ipfsHash,
+        uint256 _date,
+        uint256 _maxTicketsPerUser
+    ) public onlyEventCreator(_occasionId) {
+        Occasion storage occasion = occasions[_occasionId];
+        if (occasion.isDeleted) revert InvalidOccasionId(_occasionId);
+
+        require(_date > block.timestamp, "Event date must be in the future");
+
+        occasion._date = _date;
+        occasion.maxTicketsPerUser = _maxTicketsPerUser;
+        occasion.ticketModels[0].ticketType = _ipfsHash;
+    }
+
+    /**
+     * @dev Update an existing occasion.
+     * @param _occasionId ID of the occasion to update.
+     * @param _ipfsHash New IPFS hash of occasion metadata.
+     * @param _date New date for the occasion.
+     */
+    function updateOccasion(
+        uint256 _occasionId,
+        string calldata _ipfsHash,
         uint256 _date
     ) external onlyEventCreator(_occasionId) {
-        require(date > block.timestamp, "Event date should be in the future");
-        Occasion storage occasion = occasions[_occasionId];
-
-        require(!occasion.isDeleted, "Occasion has been deleted");
-
-        occasion.ipfsHash = ipfsHash;
-        occasion.date = date;
+        updateOccasion(_occasionId, _ipfsHash, _date, 1);
     }
+
+    
 
     /**
      * @dev Get all active occasions.
@@ -173,11 +218,70 @@ contract ZetbaTicketing is ERC721Base, Permissions, ReentrancyGuard {
     /**
      * @dev Get a specific occasion by its ID.
      */
-    function getOccasion(uint256 _occasionId) external view returns (Occasion memory) {
+    function getOccasionById(uint256 _occasionId) external view returns (Occasion memory) {
         Occasion storage occasion = occasions[_occasionId];
         require(_occasionId <= occasionIdCount, "Invalid occasion ID");
-        require(!occasion.isDeleted || occasion.isActive, "Occasion is either deleted or deactivate");
+        require(!occasion.isDeleted || occasion.isActive, "Occasion is either deleted or deactivated");
         return occasion;
+    }
+
+    /**
+     * @dev Update a ticket model.
+     * @param _occasionId ID of the occasion.
+     * @param _modelId ID of the ticket model.
+     * @param _ticketType New ticket type.
+     * @param _price New ticket price.
+     * @param _isTransferrable Whether the ticket is transferrable.
+     * @param _isResellable Whether the ticket is resellable.
+     * @param _isRefundable Whether the ticket is refundable.
+     */
+    function updateTicketModel(
+        uint256 _occasionId,
+        uint256 _modelId,
+        string calldata _ticketType,
+        uint256 _price,
+        bool _isTransferrable,
+        bool _isResellable,
+        bool _isRefundable
+    ) external onlyEventCreator(_occasionId) {
+        TicketModel storage model = occasions[_occasionId].ticketModels[_modelId];
+        require(model.isActive, "Ticket model is not active");
+
+        model.ticketType = _ticketType;
+        model.price = _price;
+        model.isTransferrable = _isTransferrable;
+        model.isResellable = _isResellable;
+        model.isRefundable = _isRefundable;
+
+        emit TicketModelUpdated(_occasionId, _modelId);
+    }
+
+    /**
+     * @dev Deactivate a ticket model, making it unavailable for new ticket purchases.
+     * @param _occasionId ID of the occasion.
+     * @param _modelId ID of the ticket model to deactivate.
+     */
+    function deactivateTicketModel(uint256 _occasionId, uint256 _modelId) external onlyEventCreator(_occasionId) {
+        TicketModel storage model = occasions[_occasionId].ticketModels[_modelId];
+        require(model.isActive, "Ticket model is already inactive");
+
+        model.isActive = false;
+
+        emit TicketModelDeactivated(_occasionId, _modelId);
+    }
+
+    /**
+     * @dev Delete a ticket model from an occasion.
+     * @param _occasionId ID of the occasion.
+     * @param _modelId ID of the ticket model to delete.
+     */
+    function deleteTicketModel(uint256 _occasionId, uint256 _modelId) external onlyEventCreator(_occasionId) {
+        TicketModel storage model = occasions[_occasionId].ticketModels[_modelId];
+        require(model.isActive, "Ticket model is inactive");
+
+        delete occasions[_occasionId].ticketModels[_modelId];
+
+        emit TicketModelDeleted(_occasionId, _modelId);
     }
 
     /**
@@ -186,11 +290,10 @@ contract ZetbaTicketing is ERC721Base, Permissions, ReentrancyGuard {
      */
     function deactivateOccasion(uint256 _occasionId) external onlyEventCreator(_occasionId) {
         Occasion storage occasion = occasions[_occasionId];
-        occasion.isActive = false;  // Deactivate instead of deleting to avoid inconsistencies
-        
+        occasion.isActive = false;
+
         emit OccasionDeactivated(_occasionId);
     }
-
 
     /**
      * @dev Delete an occasion.
@@ -198,31 +301,30 @@ contract ZetbaTicketing is ERC721Base, Permissions, ReentrancyGuard {
      */
     function deleteOccasion(uint256 _occasionId) external onlyEventCreator(_occasionId) {
         Occasion storage occasion = occasions[_occasionId];
+        occasion.isDeleted = true;
 
-        occasion.isDeleted = true;  // Deactivate instead of deleting to avoid inconsistencies
-
-        for(uint256 i = 0; i < _currentIndex; i++) {
+        for (uint256 i = 0; i < totalMintedTickets; i++) {
             MintedTicket storage ticket = mintedTickets[i];
-            if(ticket.occasionId == _occasionId) {
+            if (ticket.occasionId == _occasionId) {
                 _refundTicket(ticket._id);
             }
         }
-        
+
         emit OccasionDeleted(_occasionId);
     }
 
     /**
      * @dev Add a ticket model to an occasion.
      * @param _occasionId ID of the occasion.
-     * @param ticketType Type of the ticket (e.g., VIP, General).
-     * @param price Price of the ticket.
-     * @param isTransferrable Whether the ticket is transferrable.
-     * @param isResellable Whether the ticket can be resold.
-     * @param totalTickets Number of tickets for this model.
+     * @param _ticketType Type of the ticket (e.g., VIP, General).
+     * @param _price Price of the ticket.
+     * @param _isTransferrable Whether the ticket is transferrable.
+     * @param _isResellable Whether the ticket can be resold.
+     * @param _totalTickets Number of tickets for this model.
      */
     function addTicketModel(
         uint256 _occasionId,
-        string memory _ticketType,
+        string calldata _ticketType,
         uint256 _price,
         bool _isTransferrable,
         bool _isResellable,
@@ -230,247 +332,125 @@ contract ZetbaTicketing is ERC721Base, Permissions, ReentrancyGuard {
         uint256 _totalTickets
     ) external onlyEventCreator(_occasionId) {
         Occasion storage occasion = occasions[_occasionId];
-        uint256 modelId = occasion.ticketModelCount;
-
-        occasion.ticketModels[modelId] = TicketModel({
-            occasionId: _occasionId,
-            ticketType: _ticketType,
-            price: _price,
-            isTransferrable: _isTransferrable,
-            isResellable: _isResellable,
-            isRefundable: _isRefundable,
-            totalTickets: _totalTickets,
-            soldTickets: 0,
-            isActive: true
-        });
+        TicketModel storage model = occasion.ticketModels.push();
+        model.occasionId = _occasionId;
+        model.ticketType = _ticketType;
+        model.price = _price;
+        model.isTransferrable = _isTransferrable;
+        model.isResellable = _isResellable;
+        model.isRefundable = _isRefundable;
+        model.totalTickets = _totalTickets;
+        model.isActive = true;
     }
 
-    /// @dev Returns whether a token can be minted in the given execution context.
     function _canMint() internal view virtual override returns (bool) {
         return true;
     }
 
     /**
-     * @dev Mint a ticket from a specific model.
-     * @param _occasionId ID of the occasion.
-     * @param modelId ID of the ticket model.
-     */
-    function buyTicket(
-        uint256 _occasionId,
-        uint256 _modelId
-    ) external payable onlyActiveOccasion(_occasionId) nonReentrant {
-        Occasion storage occasion = occasions[_occasionId];
-        TicketModel storage ticketModel = occasion.ticketModels[_modelId];
-        uint256 maxTicketsPerUser = occasion.maxTicketsPerUser;
-
-        require(occasion.isActive, "Ticket can be bought for deactivated event");
-        require(!occasion.isDeleted, "Event is deleted");
-        require(ticketModel.soldTickets < ticketModel.totalTickets, "All tickets sold");
-        require(userToTickets[msg.sender] < occasion.maxTicketsPerUser, "Exceeded ticket limit for user");
-
-        // Calculate the platform fee (percentage of the ticket price)
-        uint256 platformFee = (ticketModel.price * platformFeePercent) / 100;
-
-        require(msg.value >= ticketModel.price + platformFee, "Insufficient payment");
-        
-        // Amount to be sent to the event creator
-        uint256 creatorAmount = ticketModel.price - platformFee;
-
-        // Transfer the platform fee to the platform owner
-        (bool platformFeeSent, ) = platformOwner.call{value: platformFee * 2}("");
-        require(platformFeeSent, "Platform fee transfer failed");
-
-        // Keep record of the remaining amount on the smart contract
-        fundsByEventId[_occasionId] += creatorAmount;
-
-        // Refund any excess payment
-        if (msg.value > ticketModel.price + platformFee) {
-            payable(msg.sender).transfer(msg.value - (ticketModel.price + platformFee));
-        }
-
-        if(platformFeeSent && fundsByEventId[_occasionId]) {
-        string memory ticketURI = tokenURI(_currentIndex);
-        mintTo(msg.sender, ticketURI);
-
-        mintedTickets[_currentIndex] = MintedTicket({
-            _id: _currentIndex,
-            owner: msg.sender,
-            occasionId: _occasionId,
-            ticketModelId: _modelId,
-            ticketType: ticketModel.ticketType,
-            ipfsHash: "",
-            price: ticketModel.price,
-            platformFee: platformFee,
-            isBurnt: false,
-            isForSale: false,
-            hasCheckedIn: false
-        });
-
-        // Update sold ticket count for the event
-        ticketModel.soldTickets += 1;
-        occasion.soldTickets += 1;
-        emit TicketMinted(msg.sender, _occasionId, _modelId, ticketModel.price);
-        }
-    }
-
-    function transferTicket(
-        uint256 _ticketId,
-        address _recipient
-    ) external {
-        MintedTicket transferredTicket = mintedTickets[_ticketId];
-        TicketModel storage ticketModel = occasion.ticketModels[transferredTicket .ticketModelId];
-        bool transferrable = ticketModel.isTransferrable;
-
-        require(occasion._date > block.timestamp, "Ticket has expired");
-        require(transferrable, "Ticket cannot be transferred");
-
-        if(transferrable) {
-            transferredTicket.owner = _recipient;
-            _transfer(msg.sender, _recipient, _ticketId);
-        }
-    }
-
-    function offerTicketForSale(_ticketId) external onlyTicketOwner(_ticketId) {
-        MintedTicket storage tikcet = mintedTickets[_ticketId];
-        TicketModel storage ticketModel = occasion.ticketModels[transferredTicket .ticketModelId];
-        bool resellable = ticketModel.isResellable;
-
-        require(resellable, "Ticket cannot be sold");
-
-        if(resellable){
-            tikcet.isForSale = true;
-            emit TicketOfferedForSale(_ticketId, msg.sender);
-        }
-    }
-
-    function getTicketsForSale() external view returns (MintedTicket[] memory) {
-        MintedTicket[] memory ticketsForSale = new Occasion[](ticketsForSaleIdCount);
-
-        for(uint256 i = 0; i < ticketsForSaleIdCount; i++) {
-            MintedTicket storage ticket = mintedTickets[i];
-            if(ticket.isForSale) {
-                ticketsForSale[i] = ticket;
-            }
-        }
-
-        return ticketsForSale;
-    }
-
-    function resellTicket(
-        uint256 _ticketId
-    ) external payable nonReentrant {
-        MintedTicket resoldTicket = mintedTickets[_ticketId];
-        TicketModel storage ticketModel = occasion.ticketModels[resoldTicket.ticketModelId];
-        bool resellable = ticketModel.isResellable;
-        address prevOwner = resoldTicket.owner;
-
-        require(resellable, "Ticket cannot be transferred");
-        require(occasion._date > block.timestamp, "Ticket has expired");
-
-        // Calculate the platform fee (percentage of the ticket price)
-        uint256 platformFee = (ticketModel.price * platformFeePercent) / 100;
-        require(msg.value >= ticketModel.price + platformFee, "Insufficient payment");
-        
-        // Amount to be sent to the event creator
-        uint256 sellerAmt = msg.value - platformFee;
-
-        // Transfer the platform fee to the platform owner
-        (bool platformFeeSent, ) = platformOwner.call{value: platformFee}("");
-        require(platformFeeSent, "Platform fee transfer failed");
-
-        (bool sellerFeeSent, ) = prevOwner.call{value: sellerAmt}("");
-        require(platformFeeSent, "Platform fee transfer failed");
-
-
-        if(platformFeeSent && sellerFeeSent) {
-            resoldTicket.owner = msg.sender;
-            _transfer(resoldTicket.owner, msg.sender, _ticketId);
-            emit TicketResold(_ticketId, prevOwner, msg.sender)
-        }
-
-
-    }
-
-    /**
- * @dev Refunds a user who purchased a ticket.
- * @param _ticketId ID of the ticket to be refunded.
+ * @dev Mint a ticket from a specific model.
+ * @param _occasionId ID of the occasion.
+ * @param _modelId ID of the ticket model.
  */
-function refundTicket(uint256 _ticketId) external payable onlyTicketOwner(_ticketId) nonReentrant {
-    // Check if the ticket exists and is owned by the caller
-    MintedTicket storage ticket = mintedTickets[_ticketId];
-    require(!ticket.isBurnt, "Ticket has already been burnt");
-    require(!ticket.hasCheckedIn, "Cannot refund after check-in");
+function buyTicket(uint256 _occasionId, uint256 _modelId) external payable onlyActiveOccasion(_occasionId) nonReentrant {
+    Occasion storage occasion = occasions[_occasionId];
+    TicketModel storage ticketModel = occasion.ticketModels[_modelId];
 
-    // Get the ticket model and check if it's refundable
-    Occasion storage occasion = occasions[ticket.occasionId];
-    TicketModel storage ticketModel = occasion.ticketModels[ticket.ticketModelId];
-    require(ticketModel.isRefundable, "This ticket is not refundable");
-    require(occasion._date > block.timestamp, "Ticket has expired");
+    // Check if the ticket model is active and has available tickets
+    require(ticketModel.soldTickets < ticketModel.totalTickets, "All available tickets have been sold");
 
-    // Calculate the refund amount
-    uint256 refundAmount = ticket.price;
-    
-    // Transfer the refund to the buyer (caller)
-    (bool success, ) = payable(msg.sender).call{value: refundAmount}("");
-    require(success, "Refund transfer failed");
+    // Calculate the platform fee (2% of the ticket price)
+    uint256 platformFee = (ticketModel.price * platformFeePercent).ceilDiv(100);
 
-    if(success) {
-        // Burn the ticket (mark it as burnt so it can't be used)
-        _burn(_ticketId);
-        ticket.isBurnt = true;
+    // Calculate the total amount required (ticket price + platform fee)
+    uint256 totalAmountRequired = ticketModel.price + platformFee;
 
-        // Update sold tickets count (optional)
-        ticketModel.soldTickets -= 1;
+    // Ensure the buyer has sent enough funds to cover both the ticket price and the platform fee
+    require(msg.value >= totalAmountRequired, "Insufficient funds sent");
 
-        // Emit an event for the refund
-        emit TicketRefunded(msg.sender, _ticketId, refundAmount);
+    // Transfer the platform fee to the platform owner
+    (bool platformFeeSuccess,) = platformOwner.call{value: platformFee}("");
+    require(platformFeeSuccess, "Platform fee transfer failed");
+
+    // The remaining amount (ticket price) goes into the event's funds
+    fundsByEventId[_occasionId] += ticketModel.price;
+
+    // Mint the ticket (using ERC721's _safeMint method)
+    _safeMint(msg.sender, 1);
+
+    // Record the minted ticket's details
+    MintedTicket storage mintedTicket = mintedTickets[_currentIndex];  // _currentIndex comes from ERC721Base
+    mintedTicket._id = totalMintedTickets;
+    mintedTicket.occasionId = _occasionId;
+    mintedTicket.ticketModelId = _modelId;
+    mintedTicket.owner = msg.sender;
+    mintedTicket.price = ticketModel.price;
+    mintedTicket.platformFee = platformFee;
+
+    // Update the ticket count for the event and model
+    ticketModel.soldTickets++;
+    occasion.soldTickets++;
+
+    emit TicketMinted(msg.sender, _occasionId, _modelId, ticketModel.price);
+
+    // If the user sent more than the required amount, refund the excess
+    if (msg.value > totalAmountRequired) {
+        uint256 refundAmount = msg.value - totalAmountRequired;
+        (bool refundSuccess,) = payable(msg.sender).call{value: refundAmount}("");
+        require(refundSuccess, "Refund failed");
     }
 }
 
-    /**
- * @dev Refunds a user who purchased a ticket.
- * @param _ticketId ID of the ticket to be refunded.
- */
-function _refundTicket(uint256 _ticketId) external payable nonReentrant {
-    // Check if the ticket exists and is owned by the caller
-    MintedTicket storage ticket = mintedTickets[_ticketId];
-    require(!ticket.isBurnt, "Ticket has already been burnt");
-    require(!ticket.hasCheckedIn, "Cannot refund after check-in");
 
-    // Get the ticket model and check if it's refundable
-    Occasion storage occasion = occasions[ticket.occasionId];
-    TicketModel storage ticketModel = occasion.ticketModels[ticket.ticketModelId];
-    require(occasion._date > block.timestamp, "Ticket has expired");
+    function transferTicket(uint256 _ticketId, address _recipient) external onlyTicketOwner(_ticketId) onlyExistingTicket(_ticketId) {
+        MintedTicket storage ticket = mintedTickets[_ticketId];
+        TicketModel storage ticketModel = occasions[ticket.occasionId].ticketModels[ticket.ticketModelId];
 
-    // Calculate the refund amount
-    uint256 refundAmount = ticket.price;
-    
-    // Transfer the refund to the buyer (caller)
-    (bool success, ) = payable(msg.sender).call{value: refundAmount}("");
-    require(success, "Refund transfer failed");
+        require(ticketModel.isTransferrable, "Ticket is untransferrable");
+        require(occasions[ticket.occasionId]._date > block.timestamp, "Ticket has expired");
 
-    if(success) {
-        // Burn the ticket (mark it as burnt so it can't be used)
-        _burn(_ticketId);
-        ticket.isBurnt = true;
-
-        // Update sold tickets count (optional)
-        ticketModel.soldTickets -= 1;
-
-        // Emit an event for the refund
-        emit TicketRefunded(msg.sender, _ticketId, refundAmount);
+        safeTransferFrom(msg.sender, _recipient, _ticketId);
+        ticket.owner = _recipient;
     }
-}
 
+    function refundTicket(uint256 _ticketId) public onlyTicketOwner(_ticketId) onlyExistingTicket(_ticketId) nonReentrant {
+        MintedTicket storage ticket = mintedTickets[_ticketId];
+        TicketModel storage ticketModel = occasions[ticket.occasionId].ticketModels[ticket.ticketModelId];
+
+        require(ticketModel.isRefundable, "Refund cannot be made");
+        require(occasions[ticket.occasionId]._date >= block.timestamp, "Ticket has expired");
+
+        (bool success,) = payable(msg.sender).call{value: ticket.price}("");
+        require(success, "Insufficient funds");
+
+        ticket.isBurnt = true;
+        _burn(_ticketId, true);
+
+    }
+
+    function _refundTicket(uint256 _ticketId) private onlyExistingTicket(_ticketId) nonReentrant {
+        MintedTicket storage ticket = mintedTickets[_ticketId];
+        TicketModel storage ticketModel = occasions[ticket.occasionId].ticketModels[ticket.ticketModelId];
+
+        require(ticketModel.isRefundable, "Refund cannot be made");
+        require(occasions[ticket.occasionId]._date >= block.timestamp, "Ticket has expired");
+
+        (bool success,) = payable(msg.sender).call{value: ticket.price}("");
+        require(success, "Insufficient funds");
+
+        ticket.isBurnt = true;
+        _burn(_ticketId);
+
+    }
 
     /**
      * @dev Check in a ticket.
      * @param _occasionId ID of the occasion.
-     * @param ticketId ID of the ticket.
+     * @param _ticketId ID of the ticket.
      */
-    function checkInTicket(uint256 _occasionId, uint256 _ticketId) external onlyEventCreator(_occasionId) {
+    function checkInTicket(uint256 _occasionId, uint256 _ticketId) external onlyEventCreator(_occasionId) onlyExistingTicket(_ticketId) {
         MintedTicket storage ticket = mintedTickets[_ticketId];
-        require(ticket._occasionId == _occasionId, "Ticket does not belong to this occasion");
+        require(ticket.occasionId == _occasionId, "Ticket does not belong to this occasion");
         require(!ticket.hasCheckedIn, "Ticket already checked in");
         require(!ticket.isBurnt, "Ticket has been burnt");
 
@@ -478,18 +458,19 @@ function _refundTicket(uint256 _ticketId) external payable nonReentrant {
         emit CheckedIn(_ticketId, _occasionId);
     }
 
-    function payoutToEventCreator(uint256 _occasionId) external {
+    function payoutToEventCreator(uint256 _occasionId) external nonReentrant {
         Occasion storage occasion = occasions[_occasionId];
-        require(!occasion.isPaidOut, "Payout already done");
-        require(block.timestamp > occasion.date, "You only get funds after event");
-        require(block.timestamp >= occasion.date + 86400000, "You have to wait 24 hours after the event date before you get payout");
+
+        require(block.timestamp >= occasion._date + 1 days, "You can withdraw only after 24 hours");
+        require(!occasion.isPaidOut, "Payout already completed");
 
         uint256 amount = fundsByEventId[_occasionId];
         fundsByEventId[_occasionId] = 0;
         occasion.isPaidOut = true;
 
-        // Transfer the total funds to the event creator
-        occasion.creator.transfer(amount);
+        (bool success,) = payable(occasion.creator).call{value: amount}("");
+        require(success, "Insufficient funds");
+
         emit EventFundsPaidOut(occasion.creator, amount);
     }
 }
