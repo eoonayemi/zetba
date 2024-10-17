@@ -458,6 +458,17 @@ function buyTicket(uint256 _occasionId, uint256 _modelId) external payable onlyA
         emit CheckedIn(_ticketId, _occasionId);
     }
 
+    function getMintedTickets() external view returns (MintedTicket[] memory) {
+        MintedTicket[] memory tickets = new MintedTicket[](_currentIndex);
+
+        uint256 index;
+        for(uint256 i = 0; i < _currentIndex; i++) {
+            tickets[index] = mintedTickets[i];
+        }
+
+        return tickets;
+    }
+ 
     function payoutToEventCreator(uint256 _occasionId) external nonReentrant {
         Occasion storage occasion = occasions[_occasionId];
 
