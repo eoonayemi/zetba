@@ -17,6 +17,7 @@ contract ZetbaTicketing is ERC721Base, Permissions, ReentrancyGuard {
     uint256 public totalEventCreators;
     uint256 public totalMintedTickets;
     uint256 internal occasionIdCount;
+
     address public platformOwner;
     uint256 public platformFeePercent;
     uint256 internal ticketsForSaleIdCount;

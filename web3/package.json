@@ -1,13 +1,16 @@
 {
-  "name": "hardhat-javascript-starter",
+  "name": "zetba-event-ticketing-smart-contract",
+  "type": "module",
   "scripts": {
     "build": "npx thirdweb@latest detect",
     "deploy": "npx thirdweb@latest deploy",
-    "publish": "npx thirdweb@latest publish"
+    "publish": "npx thirdweb@latest publish",
+    "compile-and-test": "npx hardhat compile && npx hardhat test"
   },
   "devDependencies": {
     "@matterlabs/hardhat-zksync-solc": "^0.3.17",
-    "hardhat": "^2.13.0"
+    "chai": "^5.1.1",
+    "hardhat": "^2.22.13"
   },
   "dependencies": {
     "@openzeppelin/contracts": "^5.0.2",
